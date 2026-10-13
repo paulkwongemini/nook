@@ -250,6 +250,24 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
         let directionButtons = cameraButtons.filter { ($0.accessibilityLabel() ?? "").hasPrefix("Move camera ") }
         try check(directionButtons.count == 4 && directionButtons.allSatisfy { !$0.isEnabled },
                   "All four camera directions stay disabled before control discovery")
+        let environmentFile = CameraCredentialStore.defaultEnvironmentFile
+        try check(environmentFile.deletingLastPathComponent().lastPathComponent == "local.nook.native.tests" &&
+                  !FileManager.default.fileExists(atPath: environmentFile.path), "The account fixture must be isolated from Nook's real .env")
+        try FileManager.default.createDirectory(at: environmentFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: environmentFile) }
+        try "NOOK_CAMERA_USERNAME=smoke-camera\nNOOK_CAMERA_PASSWORD=smoke-secret\n".write(to: environmentFile, atomically: true, encoding: .utf8)
+        camera.showSettings()
+        let accountFields = cameraSubviews(camera).compactMap { $0 as? NSTextField }.filter {
+            ["Camera username", "Camera password"].contains($0.accessibilityLabel() ?? "")
+        }
+        try check(accountFields.count == 2 && accountFields.allSatisfy { !$0.isEditable && !$0.stringValue.isEmpty },
+                  "File-backed account fields are populated and read-only")
+        try check(cameraSubviews(camera).compactMap { $0 as? NSTextField }.contains { $0.stringValue.contains("loaded from .env") },
+                  "Camera settings explain the account source")
+        try FileManager.default.removeItem(at: environmentFile)
+        camera.showSettings()
+        try check(accountFields.allSatisfy { $0.isEditable && $0.stringValue.isEmpty },
+                  "Removing .env restores editable fallback fields without stale file credentials")
         try check(!camera.keepOpen && keepOpen.state == .off && keepOpen.bezelColor == reconnect.bezelColor,
                   "Keep Open starts off with the normal toolbar button appearance")
         keepOpen.performClick(nil)

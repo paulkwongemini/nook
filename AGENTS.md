@@ -22,4 +22,4 @@ Nook is a native Swift/AppKit macOS app. Build and test on macOS; Docker is not 
 - Test: `bash scripts/test.sh`.
 - Camera integration tests: `NOOK_TEST_CAMERA=1 bash scripts/test.sh` (requires installed VLC 3 and FFmpeg; uses generated video and isolated test credentials).
 - The camera pilot uses an existing VLC installation. Do not bundle a playback engine unless requested.
-- Never commit camera credentials, personal device addresses, VPN configurations, generated media, or app bundles. Camera credentials belong in macOS Keychain.
+- Never commit camera credentials, personal device addresses, VPN configurations, generated media, or app bundles. Camera credentials belong in the user's private local `.env` file or macOS Keychain.

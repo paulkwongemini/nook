@@ -9,6 +9,7 @@ final class CameraView: NSView {
     private let passwordField = NSSecureTextField()
     private let cameraControls = CameraControlsView(frame: .zero)
     private let formError = NSTextField(wrappingLabelWithString: "")
+    private let accountNote = NSTextField(wrappingLabelWithString: "")
     private let status = NSTextField(labelWithString: "Set up your camera")
     private let message = NSTextField(wrappingLabelWithString: "")
     private let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
@@ -102,10 +103,10 @@ final class CameraView: NSView {
         formError.textColor = .systemRed
         formError.font = .systemFont(ofSize: 12)
         form.addArrangedSubview(formError)
-        let note = NSTextField(wrappingLabelWithString: "Your camera account is saved in macOS Keychain. Turn on Keep Open to watch while using other tabs. Closing the window stops playback.")
-        note.textColor = .secondaryLabelColor
-        note.font = .systemFont(ofSize: 11)
-        form.addArrangedSubview(note)
+        accountNote.textColor = .secondaryLabelColor
+        accountNote.font = .systemFont(ofSize: 11)
+        form.addArrangedSubview(accountNote)
+        updateAccountSource(nil)
 
         [heading, renderTarget, empty, form, cameraControls].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
         fullVideoConstraints = [
@@ -122,7 +123,7 @@ final class CameraView: NSView {
             empty.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
             form.centerXAnchor.constraint(equalTo: centerXAnchor), form.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 24),
             form.widthAnchor.constraint(equalToConstant: 340), intro.widthAnchor.constraint(equalTo: form.widthAnchor),
-            formError.widthAnchor.constraint(equalTo: form.widthAnchor), note.widthAnchor.constraint(equalTo: form.widthAnchor),
+            formError.widthAnchor.constraint(equalTo: form.widthAnchor), accountNote.widthAnchor.constraint(equalTo: form.widthAnchor),
             cameraControls.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
             cameraControls.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
             cameraControls.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
@@ -257,14 +258,30 @@ final class CameraView: NSView {
         hostField.stringValue = UserDefaults.standard.string(forKey: "cameraHost") ?? ""
         usernameField.stringValue = ""
         passwordField.stringValue = ""
+        updateAccountSource(nil)
         if isActive, error == nil {
             do {
-                let account = try credentials.load()
+                let environmentAccount = try credentials.loadEnvironmentAccount()
+                let account = try environmentAccount ?? credentials.load()
                 usernameField.stringValue = account?.username ?? ""
                 passwordField.stringValue = account?.password ?? ""
-            } catch { formError.stringValue = "Could not access the camera account in Keychain. Please try again." }
+                updateAccountSource(environmentAccount)
+            } catch { formError.stringValue = (error as? CameraSettingsError)?.errorDescription ?? "Could not load camera settings. Please try again." }
         }
         window?.makeFirstResponder(hostField)
+    }
+
+    private func updateAccountSource(_ environmentAccount: CameraAccount?) {
+        usernameField.isEditable = environmentAccount == nil
+        passwordField.isEditable = environmentAccount == nil
+        if let account = environmentAccount {
+            usernameField.stringValue = account.username
+            passwordField.stringValue = account.password
+        }
+        let source = environmentAccount == nil
+            ? "Your camera account is saved in macOS Keychain."
+            : "Your camera account is loaded from .env. Edit that file to change the username or password. You can save the camera IP address here."
+        accountNote.stringValue = source + " Turn on Keep Open to watch while using other tabs. Closing the window stops playback."
     }
 
     private func loadSettings() throws {
@@ -277,9 +294,24 @@ final class CameraView: NSView {
 
     @objc private func saveAndConnect() {
         guard isActive else { return }
+        let wasUsingEnvironmentAccount = !usernameField.isEditable
+        if wasUsingEnvironmentAccount {
+            usernameField.stringValue = ""
+            passwordField.stringValue = ""
+        }
+        updateAccountSource(nil)
         do {
-            let value = try CameraSettings(host: hostField.stringValue, username: usernameField.stringValue, password: passwordField.stringValue)
-            try credentials.save(value)
+            let environmentAccount = try credentials.loadEnvironmentAccount()
+            if environmentAccount == nil, wasUsingEnvironmentAccount {
+                let account = try credentials.load()
+                usernameField.stringValue = account?.username ?? ""
+                passwordField.stringValue = account?.password ?? ""
+            }
+            updateAccountSource(environmentAccount)
+            let value = try CameraSettings(host: hostField.stringValue,
+                                           username: environmentAccount?.username ?? usernameField.stringValue,
+                                           password: environmentAccount?.password ?? passwordField.stringValue)
+            if environmentAccount == nil { try credentials.save(value) }
             UserDefaults.standard.set(value.host, forKey: "cameraHost")
             settings = value
             passwordField.stringValue = ""
@@ -288,7 +320,12 @@ final class CameraView: NSView {
         } catch { formError.stringValue = (error as? CameraSettingsError)?.errorDescription ?? "Could not save the camera account. Please try again." }
     }
     @objc private func editSettings() { showSettings() }
-    @objc private func retry() { reconnect() }
+    @objc private func retry() {
+        do {
+            try loadSettings()
+            reconnect()
+        } catch { showSettings(error: (error as? CameraSettingsError)?.errorDescription ?? "Could not load camera settings. Please try again.") }
+    }
     @objc private func toggleKeepOpen() { setKeepOpen(keepOpenButton.state == .on) }
     @objc private func stopPlayback() {
         cameraControls.stop()
