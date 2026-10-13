@@ -8,6 +8,8 @@ xcrun swiftc "${swift_flags[@]}" Native/NavigationPolicy.swift NativeTests/main.
 build/native-policy-tests
 xcrun swiftc "${swift_flags[@]}" Native/CameraSettings.swift NativeTests/CameraSettingsTests.swift -o build/native-camera-settings-tests
 build/native-camera-settings-tests
+xcrun swiftc "${swift_flags[@]}" Native/CameraSettings.swift Native/CameraPTZ.swift NativeTests/CameraPTZTests.swift -o build/native-camera-ptz-tests
+build/native-camera-ptz-tests
 xcrun swiftc "${swift_flags[@]}" Native/CameraPiP.swift NativeTests/CameraPiPTests.swift -o build/native-camera-pip-tests
 build/native-camera-pip-tests
 node --test NativeTests/notifications.test.cjs
@@ -19,7 +21,7 @@ if [[ "${NOOK_TEST_CAMERA:-0}" == "1" ]]; then
 fi
 smoke="build/tests/Nook Smoke.app"
 mkdir -p "$smoke/Contents/MacOS" "$smoke/Contents/Resources"
-xcrun swiftc "${swift_flags[@]}" Native/NavigationPolicy.swift Native/ServiceIcons.swift Native/SidebarButton.swift Native/NotificationBridge.swift Native/CameraSettings.swift Native/CameraPlayer.swift Native/CameraView.swift Native/CameraPiP.swift Native/Workspace.swift NativeTests/WebSmoke.swift -o "$smoke/Contents/MacOS/NookSmoke"
+xcrun swiftc "${swift_flags[@]}" Native/NavigationPolicy.swift Native/ServiceIcons.swift Native/SidebarButton.swift Native/NotificationBridge.swift Native/CameraSettings.swift Native/CameraPTZ.swift Native/CameraControlsView.swift Native/CameraPlayer.swift Native/CameraView.swift Native/CameraPiP.swift Native/Workspace.swift NativeTests/WebSmoke.swift -o "$smoke/Contents/MacOS/NookSmoke"
 cp Native/Info.plist "$smoke/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.nook.native.tests' "$smoke/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable NookSmoke' "$smoke/Contents/Info.plist"

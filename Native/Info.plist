@@ -14,6 +14,9 @@
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
-  <key>NSLocalNetworkUsageDescription</key><string>Nook connects to your camera to show its live video.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Nook connects to your camera for live video and pan and tilt controls.</string>
+  <key>NSAppTransportSecurity</key><dict>
+    <key>NSAllowsLocalNetworking</key><true/>
+  </dict>
   <key>NSHumanReadableCopyright</key><string>Personal use</string>
 </dict></plist>

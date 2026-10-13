@@ -247,6 +247,9 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
         }
         try check(!cameraSubviews(camera).contains { $0 is NSSlider } && !cameraButtons.contains { $0.title == "Mute" },
                   "Volume and mute controls are removed")
+        let directionButtons = cameraButtons.filter { ($0.accessibilityLabel() ?? "").hasPrefix("Move camera ") }
+        try check(directionButtons.count == 4 && directionButtons.allSatisfy { !$0.isEnabled },
+                  "All four camera directions stay disabled before control discovery")
         try check(!camera.keepOpen && keepOpen.state == .off && keepOpen.bezelColor == reconnect.bezelColor,
                   "Keep Open starts off with the normal toolbar button appearance")
         keepOpen.performClick(nil)

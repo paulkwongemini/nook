@@ -7,6 +7,7 @@ final class CameraView: NSView {
     private let hostField = NSTextField()
     private let usernameField = NSTextField()
     private let passwordField = NSSecureTextField()
+    private let cameraControls = CameraControlsView(frame: .zero)
     private let formError = NSTextField(wrappingLabelWithString: "")
     private let status = NSTextField(labelWithString: "Set up your camera")
     private let message = NSTextField(wrappingLabelWithString: "")
@@ -106,10 +107,11 @@ final class CameraView: NSView {
         note.font = .systemFont(ofSize: 11)
         form.addArrangedSubview(note)
 
-        [heading, renderTarget, empty, form].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
+        [heading, renderTarget, empty, form, cameraControls].forEach { $0.translatesAutoresizingMaskIntoConstraints = false; addSubview($0) }
         fullVideoConstraints = [
             renderTarget.leadingAnchor.constraint(equalTo: leadingAnchor), renderTarget.trailingAnchor.constraint(equalTo: trailingAnchor),
-            renderTarget.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 18), renderTarget.bottomAnchor.constraint(equalTo: bottomAnchor)
+            renderTarget.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 18),
+            renderTarget.bottomAnchor.constraint(equalTo: cameraControls.topAnchor, constant: -8)
         ]
         NSLayoutConstraint.activate(fullVideoConstraints)
         NSLayoutConstraint.activate([
@@ -120,9 +122,14 @@ final class CameraView: NSView {
             empty.widthAnchor.constraint(lessThanOrEqualToConstant: 460),
             form.centerXAnchor.constraint(equalTo: centerXAnchor), form.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 24),
             form.widthAnchor.constraint(equalToConstant: 340), intro.widthAnchor.constraint(equalTo: form.widthAnchor),
-            formError.widthAnchor.constraint(equalTo: form.widthAnchor), note.widthAnchor.constraint(equalTo: form.widthAnchor)
+            formError.widthAnchor.constraint(equalTo: form.widthAnchor), note.widthAnchor.constraint(equalTo: form.widthAnchor),
+            cameraControls.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 24),
+            cameraControls.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -24),
+            cameraControls.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            cameraControls.heightAnchor.constraint(equalToConstant: 96)
         ])
         renderTarget.isHidden = true
+        cameraControls.isHidden = true
         stopButton.isEnabled = false
         reconnectButton.isEnabled = false
     }
@@ -177,6 +184,7 @@ final class CameraView: NSView {
     func deactivate() {
         guard isActive else { return }
         isActive = false
+        cameraControls.stop()
         player?.stop()
         settings = nil
         passwordField.stringValue = ""
@@ -191,13 +199,18 @@ final class CameraView: NSView {
     func reconnect() {
         guard isActive else { return }
         guard let settings else { showSettings(); return }
-        do { startPlayback(try settings.streamURL()) }
+        do {
+            startPlayback(try settings.streamURL())
+            cameraControls.connect(settings)
+        }
         catch { showSettings(error: "Check the camera IP address.") }
     }
 
     func startPlayback(_ url: URL) {
         guard isActive else { return }
         editing = false
+        cameraControls.stop()
+        cameraControls.isHidden = false
         playbackState = .connecting
         defer { notifyEligibilityChange() }
         form.isHidden = true
@@ -228,6 +241,8 @@ final class CameraView: NSView {
     func showSettings() { showSettings(error: nil) }
     private func showSettings(error: String?) {
         editing = true
+        cameraControls.stop()
+        cameraControls.isHidden = true
         playbackState = .idle
         player?.stop()
         notifyEligibilityChange()
@@ -276,6 +291,7 @@ final class CameraView: NSView {
     @objc private func retry() { reconnect() }
     @objc private func toggleKeepOpen() { setKeepOpen(keepOpenButton.state == .on) }
     @objc private func stopPlayback() {
+        cameraControls.stop()
         player?.stop()
         playerChanged(.idle)
     }
