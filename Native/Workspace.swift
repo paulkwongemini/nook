@@ -8,8 +8,13 @@ final class NativeWorkspace: NSObject, NSWindowDelegate, WKNavigationDelegate, W
     let notifications = NativeNotificationBridge()
     private(set) var selected: NativeService = .chat
     private(set) var views: [NativeService: WKWebView] = [:]
+    private(set) var isCameraSelected = false
+    private(set) var cameraView: CameraView?
+    private(set) var cameraPiP: CameraPiPView?
+    private var resumeFloatingCamera = false
     private let surface = NSView()
     private var buttons: [NativeService: NativeSidebarButton] = [:]
+    private let cameraButton = NativeSidebarButton(frame: .zero)
     private let automaticallyLoadsPages: Bool
     private let showsPopups: Bool
     private let externalOpener: (URL) -> Void
@@ -97,6 +102,18 @@ final class NativeWorkspace: NSObject, NSWindowDelegate, WKNavigationDelegate, W
             ])
             buttons[service] = button
         }
+        cameraButton.image = NativeIcons.camera
+        cameraButton.target = self
+        cameraButton.action = #selector(selectCamera)
+        cameraButton.toolTip = "Camera"
+        cameraButton.setAccessibilityLabel("Camera")
+        cameraButton.translatesAutoresizingMaskIntoConstraints = false
+        rail.addSubview(cameraButton)
+        NSLayoutConstraint.activate([
+            cameraButton.centerXAnchor.constraint(equalTo: rail.centerXAnchor),
+            cameraButton.topAnchor.constraint(equalTo: rail.topAnchor, constant: CGFloat(16 + NativeService.allCases.count * 52)),
+            cameraButton.widthAnchor.constraint(equalToConstant: 40), cameraButton.heightAnchor.constraint(equalToConstant: 40)
+        ])
     }
 
     @objc private func serviceClicked(_ sender: NSButton) { select(NativeService.allCases[sender.tag]) }
@@ -143,6 +160,9 @@ final class NativeWorkspace: NSObject, NSWindowDelegate, WKNavigationDelegate, W
     }
 
     func select(_ service: NativeService) {
+        isCameraSelected = false
+        cameraView?.isHidden = true
+        cameraButton.state = .off
         _ = ensure(.chat)
         let web = ensure(service)
         selected = service
@@ -150,18 +170,93 @@ final class NativeWorkspace: NSObject, NSWindowDelegate, WKNavigationDelegate, W
         for (key, button) in buttons {
             button.state = key == service ? .on : .off
         }
+        updateCameraPresentation()
         if automaticallyLoadsPages { reopenEntry(web, includeSignIn: false) }
         window.makeFirstResponder(web)
     }
 
-    func show() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
-    func prepareQuit() { quitting = true }
+    @objc func selectCamera() {
+        isCameraSelected = true
+        if cameraView == nil {
+            let camera = CameraView(frame: .zero)
+            camera.onPresentationChange = { [weak self] in self?.updateCameraPresentation() }
+            camera.translatesAutoresizingMaskIntoConstraints = false
+            surface.addSubview(camera)
+            NSLayoutConstraint.activate([
+                camera.leadingAnchor.constraint(equalTo: surface.leadingAnchor), camera.trailingAnchor.constraint(equalTo: surface.trailingAnchor),
+                camera.topAnchor.constraint(equalTo: surface.topAnchor), camera.bottomAnchor.constraint(equalTo: surface.bottomAnchor)
+            ])
+            cameraView = camera
+        }
+        restoreFullCamera()
+        views.values.forEach { $0.isHidden = true }
+        buttons.values.forEach { $0.state = .off }
+        cameraButton.state = .on
+        cameraView?.isHidden = false
+        if window.isVisible && !window.isMiniaturized { cameraView?.activate() }
+        window.makeFirstResponder(cameraView)
+    }
+
+    private func updateCameraPresentation() {
+        guard let camera = cameraView else { return }
+        if isCameraSelected {
+            restoreFullCamera()
+            return
+        }
+        if !quitting && window.isVisible && !window.isMiniaturized && camera.keepOpen && camera.canKeepPlaying {
+            if cameraPiP == nil {
+                let pip = CameraPiPView()
+                pip.onReturnToCamera = { [weak self] in self?.selectCamera() }
+                cameraPiP = pip
+            }
+            if let pip = cameraPiP {
+                pip.show(in: surface)
+                camera.moveVideo(to: pip.videoContainer)
+            }
+        } else {
+            restoreFullCamera()
+            camera.deactivate()
+        }
+    }
+
+    private func restoreFullCamera() {
+        cameraView?.restoreVideo()
+        cameraPiP?.dismiss()
+    }
+
+    private func pauseCameraForHiddenWindow() {
+        resumeFloatingCamera = !isCameraSelected && cameraView?.keepOpen == true && cameraView?.canKeepPlaying == true
+        cameraView?.deactivate()
+        restoreFullCamera()
+    }
+
+    private func resumeCameraIfNeeded() {
+        guard !window.isMiniaturized else { return }
+        let shouldResume = isCameraSelected || (resumeFloatingCamera && cameraView?.keepOpen == true)
+        resumeFloatingCamera = false
+        if shouldResume { cameraView?.activate() }
+        updateCameraPresentation()
+    }
+
+    func show() {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        resumeCameraIfNeeded()
+    }
+    func prepareQuit() { quitting = true; resumeFloatingCamera = false; cameraView?.deactivate(); restoreFullCamera() }
     func reload() {
+        if isCameraSelected { cameraView?.reconnect(); return }
         guard let web = views[selected] else { return }
         if !reopenEntry(web, includeSignIn: true) { web.reload() }
     }
-    func goBack() { views[selected]?.goBack() }
-    func goHome() { views[selected]?.load(URLRequest(url: selected.url)) }
+    func goBack() {
+        if isCameraSelected { select(selected) }
+        else { views[selected]?.goBack() }
+    }
+    func goHome() {
+        if isCameraSelected { cameraView?.showSettings() }
+        else { views[selected]?.load(URLRequest(url: selected.url)) }
+    }
 
     @discardableResult private func reopenEntry(_ web: WKWebView, includeSignIn: Bool) -> Bool {
         guard let url = web.url, NativeNavigationPolicy.isEntryPage(url),
@@ -178,8 +273,14 @@ final class NativeWorkspace: NSObject, NSWindowDelegate, WKNavigationDelegate, W
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if sender === window && !quitting { sender.orderOut(nil); return false }
+        if sender === window && !quitting { pauseCameraForHiddenWindow(); sender.orderOut(nil); return false }
         return true
+    }
+    func windowDidMiniaturize(_ notification: Notification) {
+        if notification.object as? NSWindow === window { pauseCameraForHiddenWindow() }
+    }
+    func windowDidDeminiaturize(_ notification: Notification) {
+        if notification.object as? NSWindow === window { resumeCameraIfNeeded() }
     }
     func windowWillClose(_ notification: Notification) {
         guard let popup = notification.object as? NSWindow, popup !== window,

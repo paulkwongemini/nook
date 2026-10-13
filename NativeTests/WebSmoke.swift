@@ -27,7 +27,7 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
             do { try await run(); print("Native WebKit \(phase): passed"); exit(0) }
             catch { fputs("Native WebKit smoke failed: \(error)\n", stderr); exit(1) }
         }
-        Task { try? await Task.sleep(nanoseconds: 25_000_000_000); fputs("Native WebKit smoke timed out\n", stderr); exit(1) }
+        Task { try? await Task.sleep(nanoseconds: 45_000_000_000); fputs("Native WebKit smoke timed out\n", stderr); exit(1) }
     }
     private func check(_ value: @autoclosure () -> Bool, _ message: String) throws {
         if !value() { throw NSError(domain: "Smoke", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
@@ -39,11 +39,66 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
         }
         throw NSError(domain: "Smoke", code: 2, userInfo: [NSLocalizedDescriptionKey: "Fixture did not load"])
     }
+    private func waitForCamera(_ condition: () -> Bool) async throws {
+        for _ in 0..<100 {
+            if condition() { return }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try check(false, "Camera playback did not reach its expected state")
+    }
+    private func checkCameraContinuity(_ camera: CameraView, keepOpen: NSButton) async throws {
+        let clip = URL(fileURLWithPath: "build/camera-fixture.mp4")
+        workspace.selectCamera()
+        camera.startPlayback(clip)
+        try await waitForCamera { camera.canKeepPlaying && !camera.renderTarget.isHidden && !camera.renderTarget.subviews.isEmpty }
+        let video = camera.renderTarget.subviews.first!
+        keepOpen.performClick(nil)
+        for service in NativeService.allCases {
+            workspace.select(service)
+            workspace.window.contentView?.layoutSubtreeIfNeeded()
+            try await Task.sleep(nanoseconds: 150_000_000)
+            guard let pip = workspace.cameraPiP, let host = pip.superview else {
+                try check(false, "Keep Open must create an in-window picture in picture")
+                return
+            }
+            try check(camera.isActive && camera.canKeepPlaying && camera.isHidden,
+                      "Keep Open preserves live playback while the full camera panel is hidden")
+            try check(camera.renderTarget.superview === pip.videoContainer && camera.renderTarget.subviews.first === video,
+                      "Switching Google tabs reuses the same live native video")
+            try check(host.subviews.last === pip && !workspace.views[service]!.isHidden,
+                      "The mini-player remains above each selected Google page")
+            try check(camera.renderTarget.bounds.size == NSSize(width: 320, height: 180),
+                      "The live renderer fits the mini-player")
+        }
+        let pip = workspace.cameraPiP!
+        try check(pip.accessibilityPerformPress(), "The mini-player can reopen Camera")
+        workspace.window.contentView?.layoutSubtreeIfNeeded()
+        try check(workspace.isCameraSelected && pip.superview == nil && camera.renderTarget.superview === camera,
+                  "Returning to Camera restores the full-size video")
+        try check(camera.renderTarget.subviews.first === video && camera.canKeepPlaying,
+                  "Returning to Camera does not reconnect or replace the video")
+        workspace.select(.calendar)
+        workspace.window.miniaturize(nil)
+        try await waitForCamera { workspace.window.isMiniaturized && !camera.isActive }
+        try check(pip.superview == nil && camera.renderTarget.superview === camera,
+                  "Minimizing stops background playback and removes the mini-player")
+        workspace.window.deminiaturize(nil)
+        try await waitForCamera { !workspace.window.isMiniaturized }
+        workspace.selectCamera()
+        camera.startPlayback(clip)
+        try await waitForCamera { !camera.renderTarget.isHidden && !camera.renderTarget.subviews.isEmpty }
+        keepOpen.performClick(nil)
+        workspace.select(.calendar)
+        try check(!camera.keepOpen && !camera.isActive && pip.superview == nil,
+                  "With Keep Open off, changing tabs stops playback")
+        try await waitForCamera { camera.renderTarget.subviews.isEmpty }
+        print("Camera Keep Open, all Google tabs, full-size return, and minimize: passed")
+    }
     private func checkShellAppearance() async throws {
         func descendants(_ view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + descendants($0) } }
         let buttons = descendants(workspace.window.contentView!).compactMap { $0 as? NativeSidebarButton }
-        try check(buttons.map { $0.accessibilityLabel() ?? "" } == ["Chat", "Mail", "Drive", "Calendar"],
-                  "Sidebar exposes all four services in the requested order")
+        try check(buttons.map { $0.accessibilityLabel() ?? "" } == ["Chat", "Mail", "Drive", "Calendar", "Camera"],
+                  "Sidebar keeps Google services in order and adds Camera last")
         try check(workspace.window.appearance == nil, "The window inherits system appearance")
         let chatButton = buttons.first { $0.tag == 0 }!
         let gmailButton = buttons.first { $0.tag == 1 }!
@@ -175,6 +230,42 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
         try check(workspace.views[.calendar] === calendar, "Returning to Calendar preserves its page")
         let eventDraft = try await calendar.evaluateJavaScript("document.getElementById('event').value") as? String
         try check(eventDraft == "unsaved event", "Service switch preserves the Calendar event draft")
+        workspace.selectCamera()
+        guard let camera = workspace.cameraView else {
+            throw NSError(domain: "Smoke", code: 4, userInfo: [NSLocalizedDescriptionKey: "Camera panel was not created"])
+        }
+        workspace.window.contentView?.layoutSubtreeIfNeeded()
+        try check(workspace.isCameraSelected && camera.isActive && !camera.isHidden && workspace.views.values.allSatisfy(\.isHidden),
+                  "Camera replaces the visible page without opening an external app")
+        try check(camera.bounds.width >= 899 && camera.bounds.height >= 664, "Camera fills the content area")
+        try check(workspace.views.count == 4 && external.isEmpty, "Camera keeps the Google pages and account session intact")
+        func cameraSubviews(_ view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + cameraSubviews($0) } }
+        let cameraButtons = cameraSubviews(camera).compactMap { $0 as? NSButton }
+        guard let keepOpen = cameraButtons.first(where: { $0.title == "Keep Open" }),
+              let reconnect = cameraButtons.first(where: { $0.title == "Reconnect" }) else {
+            throw NSError(domain: "Smoke", code: 5, userInfo: [NSLocalizedDescriptionKey: "Camera Keep Open control is missing"])
+        }
+        try check(!cameraSubviews(camera).contains { $0 is NSSlider } && !cameraButtons.contains { $0.title == "Mute" },
+                  "Volume and mute controls are removed")
+        try check(!camera.keepOpen && keepOpen.state == .off && keepOpen.bezelColor == reconnect.bezelColor,
+                  "Keep Open starts off with the normal toolbar button appearance")
+        keepOpen.performClick(nil)
+        try check(camera.keepOpen && keepOpen.state == .on && keepOpen.bezelColor == .controlAccentColor,
+                  "Keep Open changes to the active color when clicked")
+        keepOpen.performClick(nil)
+        try check(!camera.keepOpen && keepOpen.state == .off && keepOpen.bezelColor == reconnect.bezelColor,
+                  "A second click restores the normal toolbar button appearance")
+        workspace.reload()
+        workspace.goHome()
+        try check(workspace.isCameraSelected && calendar.isHidden, "Camera navigation never reloads the previous Google page")
+        workspace.goBack()
+        try check(!workspace.isCameraSelected && !camera.isActive && camera.isHidden && !calendar.isHidden,
+                  "Back leaves Camera and restores the previous service")
+        let preservedEvent = try await calendar.evaluateJavaScript("document.getElementById('event').value") as? String
+        try check(preservedEvent == "unsaved event", "Camera use preserves an unsaved Calendar draft")
+        if ProcessInfo.processInfo.environment["NOOK_TEST_CAMERA"] == "1" {
+            try await checkCameraContinuity(camera, keepOpen: keepOpen)
+        }
         workspace.select(.chat)
         for size in [NSSize(width: 1280, height: 860), NSSize(width: 1040, height: 720)] {
             workspace.window.setContentSize(size)
@@ -208,7 +299,18 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
         }
         try check(download.converted, "Page-generated Blob download reaches WKDownload without external navigation")
         chat.navigationDelegate = workspace
+        workspace.selectCamera()
+        if ProcessInfo.processInfo.environment["NOOK_TEST_CAMERA"] == "1" {
+            camera.startPlayback(URL(fileURLWithPath: "build/camera-fixture.mp4"))
+            try await waitForCamera { !camera.renderTarget.isHidden && !camera.renderTarget.subviews.isEmpty }
+            camera.setKeepOpen(true)
+            workspace.select(.chat)
+            try check(workspace.cameraPiP?.superview != nil, "Close test begins with a live mini-player")
+        }
         workspace.window.performClose(nil)
+        try check(!camera.isActive, "Closing the window deactivates camera playback")
+        try check(workspace.cameraPiP?.superview == nil && camera.renderTarget.superview === camera,
+                  "Closing the window removes the mini-player and restores the video host")
         try check(!workspace.window.isVisible && workspace.views[.chat] === chat, "Closing window keeps Chat alive")
         workspace.prepareQuit()
         // Allow WebKit's asynchronous cookie persistence to settle before process exit.

@@ -6,6 +6,8 @@ I built Nook to keep my work Google account separate from my personal Chrome ses
 
 It opens Google's own pages and keeps one account signed in across the services. Docs, Sheets, and Slides open in your browser.
 
+The Camera tab plays an RTSP camera inside Nook using [VLC](https://www.videolan.org/vlc/) installed on your Mac. Use a home VPN to watch remotely. Turn on **Keep Open** to keep video and sound playing in a small corner view while using other tabs. Camera credentials stay in macOS Keychain.
+
 Nook is written in Swift and uses the WebKit already on your Mac. The current Apple Silicon app is **under 1 MB**, compared with **around 300 MB** for the Electron 44.6.0 runtime used in the earlier prototype.
 
 ## Try it

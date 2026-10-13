@@ -54,6 +54,7 @@ final class NativeAppDelegate: NSObject, NSApplicationDelegate {
             let entry = NSMenuItem(title: service.title, action: #selector(selectService(_:)), keyEquivalent: String(index + 1))
             entry.target = self; entry.tag = index; view.addItem(entry)
         }
+        item(view, "Camera", #selector(camera), "5", target: self)
         view.addItem(.separator())
         item(view, "Back", #selector(back), "[", target: self)
         item(view, "Reload", #selector(reload), "r", target: self)
@@ -71,6 +72,7 @@ final class NativeAppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc private func show() { workspace.show() }
     @objc private func selectService(_ sender: NSMenuItem) { workspace.select(NativeService.allCases[sender.tag]) }
+    @objc private func camera() { workspace.selectCamera() }
     @objc private func back() { workspace.goBack() }
     @objc private func reload() { workspace.reload() }
     @objc private func home() { workspace.goHome() }
@@ -80,7 +82,7 @@ final class NativeAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func about() {
         var options: [NSApplication.AboutPanelOptionKey: Any] = [
             .applicationName: "Nook", .applicationVersion: "0.0.1",
-            .credits: NSAttributedString(string: "Swift · AppKit · WebKit\nChat · Mail · Drive · Calendar")]
+            .credits: NSAttributedString(string: "Swift · AppKit · WebKit\nChat · Mail · Drive · Calendar · Camera")]
         if let icon = NSApp.applicationIconImage { options[.applicationIcon] = icon }
         NSApp.orderFrontStandardAboutPanel(options: options)
     }
