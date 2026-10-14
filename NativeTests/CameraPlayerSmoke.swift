@@ -34,11 +34,19 @@ struct CameraPlayerSmoke {
             do {
                 let player = try CameraPlayer()
                 var state = CameraPlayer.State.idle
-                player.onStateChange = { state = $0 }
+                var videoSizeAtPlaying: CGSize?
+                player.onStateChange = { [weak player] nextState in
+                    state = nextState
+                    if nextState == .playing { videoSizeAtPlaying = player?.videoSize }
+                }
                 for round in 0..<3 {
                     try player.play(clip, in: view)
                     try await waitUntil("Generated clip must play in Nook's NSView") {
                         state == .playing && !view.subviews.isEmpty
+                    }
+                    guard videoSizeAtPlaying == CGSize(width: 1280, height: 720) else {
+                        throw NSError(domain: "CameraPlayerSmoke", code: 6,
+                                      userInfo: [NSLocalizedDescriptionKey: "The playing callback must expose the original video dimensions"])
                     }
                     if round == 0 {
                         try await checkReparenting(player, view: view, fullHost: fullHost, miniHost: miniHost)
@@ -76,7 +84,7 @@ struct CameraPlayerSmoke {
                 }
                 player.stop()
                 try await waitUntil("Failed connection recovery must also stop cleanly") { view.subviews.isEmpty }
-                print("Camera player: embedded video, repeated stop, rapid reconnect, failure recovery, and uninterrupted mini-player passed")
+                print("Camera player: embedded video, original dimensions, repeated stop, rapid reconnect, failure recovery, and uninterrupted mini-player passed")
                 window.orderOut(nil)
                 exit(0)
             } catch {

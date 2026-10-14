@@ -50,8 +50,16 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
         let clip = URL(fileURLWithPath: "build/camera-fixture.mp4")
         workspace.selectCamera()
         camera.startPlayback(clip)
-        try await waitForCamera { camera.canKeepPlaying && !camera.renderTarget.isHidden && !camera.renderTarget.subviews.isEmpty }
-        let video = camera.renderTarget.subviews.first!
+        try await waitForCamera { camera.canKeepPlaying && !camera.renderTarget.isHidden && !camera.renderTarget.drawable.subviews.isEmpty }
+        let video = camera.renderTarget.drawable.subviews.first!
+        func descendants(_ view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + descendants($0) } }
+        let controls = descendants(camera)
+        let zoom = controls.compactMap { $0 as? NSSlider }.first { $0.accessibilityLabel() == "Digital zoom" }!
+        let reset = controls.compactMap { $0 as? NSButton }.first { $0.title == "Reset" }!
+        try check(zoom.isEnabled && reset.isEnabled, "Playback enables Zoom and Reset")
+        zoom.doubleValue = 2
+        zoom.sendAction(zoom.action!, to: zoom.target)
+        try check(camera.renderTarget.zoom == 2, "Zoom control enlarges the real video viewport")
         keepOpen.performClick(nil)
         for service in NativeService.allCases {
             workspace.select(service)
@@ -63,19 +71,20 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
             }
             try check(camera.isActive && camera.canKeepPlaying && camera.isHidden,
                       "Keep Open preserves live playback while the full camera panel is hidden")
-            try check(camera.renderTarget.superview === pip.videoContainer && camera.renderTarget.subviews.first === video,
+            try check(camera.renderTarget.superview === pip.videoContainer && camera.renderTarget.drawable.subviews.first === video,
                       "Switching Google tabs reuses the same live native video")
             try check(host.subviews.last === pip && !workspace.views[service]!.isHidden,
                       "The mini-player remains above each selected Google page")
             try check(camera.renderTarget.bounds.size == NSSize(width: 320, height: 180),
                       "The live renderer fits the mini-player")
+            try check(camera.renderTarget.zoom == 2, "Zoom remains active in the mini-player")
         }
         let pip = workspace.cameraPiP!
         try check(pip.accessibilityPerformPress(), "The mini-player can reopen Camera")
         workspace.window.contentView?.layoutSubtreeIfNeeded()
         try check(workspace.isCameraSelected && pip.superview == nil && camera.renderTarget.superview === camera,
                   "Returning to Camera restores the full-size video")
-        try check(camera.renderTarget.subviews.first === video && camera.canKeepPlaying,
+        try check(camera.renderTarget.drawable.subviews.first === video && camera.canKeepPlaying,
                   "Returning to Camera does not reconnect or replace the video")
         workspace.select(.calendar)
         workspace.window.miniaturize(nil)
@@ -86,13 +95,18 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
         try await waitForCamera { !workspace.window.isMiniaturized }
         workspace.selectCamera()
         camera.startPlayback(clip)
-        try await waitForCamera { !camera.renderTarget.isHidden && !camera.renderTarget.subviews.isEmpty }
+        try await waitForCamera { !camera.renderTarget.isHidden && !camera.renderTarget.drawable.subviews.isEmpty }
+        zoom.doubleValue = 3
+        zoom.sendAction(zoom.action!, to: zoom.target)
+        reset.performClick(nil)
+        try check(camera.renderTarget.zoom == 1 && camera.renderTarget.center == CGPoint(x: 0.5, y: 0.5),
+                  "Reset restores the full frame and centered view")
         keepOpen.performClick(nil)
         workspace.select(.calendar)
         try check(!camera.keepOpen && !camera.isActive && pip.superview == nil,
                   "With Keep Open off, changing tabs stops playback")
-        try await waitForCamera { camera.renderTarget.subviews.isEmpty }
-        print("Camera Keep Open, all Google tabs, full-size return, and minimize: passed")
+        try await waitForCamera { camera.renderTarget.drawable.subviews.isEmpty }
+        print("Camera Zoom, Keep Open, all Google tabs, full-size return, and minimize: passed")
     }
     private func checkShellAppearance() async throws {
         func descendants(_ view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + descendants($0) } }
@@ -245,8 +259,14 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
               let reconnect = cameraButtons.first(where: { $0.title == "Reconnect" }) else {
             throw NSError(domain: "Smoke", code: 5, userInfo: [NSLocalizedDescriptionKey: "Camera Keep Open control is missing"])
         }
-        try check(!cameraSubviews(camera).contains { $0 is NSSlider } && !cameraButtons.contains { $0.title == "Mute" },
-                  "Volume and mute controls are removed")
+        let sliders = cameraSubviews(camera).compactMap { $0 as? NSSlider }
+        try check(sliders.count == 1 && sliders[0].accessibilityLabel() == "Digital zoom" &&
+                  sliders[0].minValue == 1 && sliders[0].maxValue == 4 && !sliders[0].isEnabled,
+                  "Camera offers 1–4× digital zoom, disabled until video plays")
+        try check(!cameraButtons.contains { $0.title == "Mute" } &&
+                  !cameraButtons.contains { $0.title == "Lock" || $0.title == "Unlock" } &&
+                  cameraButtons.contains { $0.title == "Reset" && !$0.isEnabled },
+                  "Camera offers Reset without tracking or volume controls, disabled until video plays")
         let directionButtons = cameraButtons.filter { ($0.accessibilityLabel() ?? "").hasPrefix("Move camera ") }
         try check(directionButtons.count == 4 && directionButtons.allSatisfy { !$0.isEnabled },
                   "All four camera directions stay disabled before control discovery")
@@ -323,7 +343,7 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
         workspace.selectCamera()
         if ProcessInfo.processInfo.environment["NOOK_TEST_CAMERA"] == "1" {
             camera.startPlayback(URL(fileURLWithPath: "build/camera-fixture.mp4"))
-            try await waitForCamera { !camera.renderTarget.isHidden && !camera.renderTarget.subviews.isEmpty }
+            try await waitForCamera { !camera.renderTarget.isHidden && !camera.renderTarget.drawable.subviews.isEmpty }
             camera.setKeepOpen(true)
             workspace.select(.chat)
             try check(workspace.cameraPiP?.superview != nil, "Close test begins with a live mini-player")

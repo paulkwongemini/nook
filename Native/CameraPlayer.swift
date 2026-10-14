@@ -6,6 +6,7 @@ import Darwin
 final class CameraPlayer {
     enum State { case idle, connecting, playing, ended, failed }
     var onStateChange: ((State) -> Void)?
+    private(set) var videoSize: CGSize?
     private let playback: VLCPlayback
     private var generation = 0
 
@@ -16,11 +17,13 @@ final class CameraPlayer {
             throw CameraPlaybackError.invalidAddress
         }
         generation += 1
+        videoSize = nil
         let request = generation
         onStateChange?(.connecting)
-        playback.play(url, in: view) { [weak self] state in
+        playback.play(url, in: view) { [weak self] state, size in
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == request else { return }
+                self.videoSize = size
                 self.onStateChange?(state)
             }
         }
@@ -28,6 +31,7 @@ final class CameraPlayer {
 
     func stop() {
         generation += 1
+        videoSize = nil
         playback.stop()
         onStateChange?(.idle)
     }
@@ -58,7 +62,7 @@ private final class VLCPlayback {
 
     init(api: VLCAPI) { self.api = api }
 
-    func play(_ url: URL, in view: NSView, notify: @escaping (CameraPlayer.State) -> Void) {
+    func play(_ url: URL, in view: NSView, notify: @escaping (CameraPlayer.State, CGSize?) -> Void) {
         let liveStream = !url.isFileURL
         queue.async { [self] in
             stopCurrent()
@@ -69,7 +73,7 @@ private final class VLCPlayback {
             let pointers = arguments.map { Optional(UnsafePointer($0)) }
             guard let engine = pointers.withUnsafeBufferPointer({ api.new(Int32($0.count), $0.baseAddress) }) else {
                 stopCurrent()
-                notify(.failed)
+                notify(.failed, nil)
                 return
             }
             instance = engine
@@ -77,7 +81,7 @@ private final class VLCPlayback {
             api.setLog(engine, { _, _, _, _, _ in }, nil)
             guard let media = url.absoluteString.withCString({ api.newMedia(engine, $0) }) else {
                 stopCurrent()
-                notify(.failed)
+                notify(.failed, nil)
                 return
             }
             ":rtsp-tcp".withCString { api.addOption(media, $0) }
@@ -85,13 +89,13 @@ private final class VLCPlayback {
             api.releaseMedia(media)
             guard let player else {
                 stopCurrent()
-                notify(.failed)
+                notify(.failed, nil)
                 return
             }
             api.setView(player, Unmanaged.passUnretained(view).toOpaque())
             guard api.play(player) == 0 else {
                 stopCurrent()
-                notify(.failed)
+                notify(.failed, nil)
                 return
             }
             let deadline = Date().addingTimeInterval(20)
@@ -107,7 +111,14 @@ private final class VLCPlayback {
                 else if rawState == 3 && self.api.hasVideo(player) > 0 { state = .playing }
                 else if lastState != .playing && Date() > deadline { state = .failed }
                 else { return }
-                if state != lastState { lastState = state; notify(state) }
+                if state != lastState {
+                    lastState = state
+                    var width: UInt32 = 0
+                    var height: UInt32 = 0
+                    let size: CGSize? = state == .playing && self.api.videoSize(player, 0, &width, &height) == 0 && width > 0 && height > 0
+                        ? CGSize(width: Int(width), height: Int(height)) : nil
+                    notify(state, size)
+                }
                 if state == .failed || state == .ended { self.stopCurrent() }
             }
             timer = poll
@@ -156,6 +167,7 @@ private final class VLCAPI {
     let releasePlayer: @convention(c) (OpaquePointer) -> Void
     let state: @convention(c) (OpaquePointer) -> Int32
     let hasVideo: @convention(c) (OpaquePointer) -> UInt32
+    let videoSize: @convention(c) (OpaquePointer, UInt32, UnsafeMutablePointer<UInt32>, UnsafeMutablePointer<UInt32>) -> Int32
 
     // The loaded engine and its plugins must outlive every asynchronous playback
     // callback. Keep a successful load for the process lifetime, including handles.
@@ -208,5 +220,6 @@ private final class VLCAPI {
         releasePlayer = try symbol("libvlc_media_player_release")
         state = try symbol("libvlc_media_player_get_state")
         hasVideo = try symbol("libvlc_media_player_has_vout")
+        videoSize = try symbol("libvlc_video_get_size")
     }
 }

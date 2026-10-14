@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor
 final class CameraView: NSView {
-    let renderTarget = NSView()
+    let renderTarget = CameraVideoView()
     private let form = NSStackView()
     private let hostField = NSTextField()
     private let usernameField = NSTextField()
@@ -66,6 +66,9 @@ final class CameraView: NSView {
         renderTarget.wantsLayer = true
         renderTarget.layer?.backgroundColor = NSColor.black.cgColor
         renderTarget.setAccessibilityLabel("Live camera video")
+        renderTarget.onZoomChange = { [weak self] in self?.cameraControls.updateZoom($0) }
+        cameraControls.onZoomChange = { [weak self] in self?.renderTarget.setZoom($0) }
+        cameraControls.onReset = { [weak self] in self?.renderTarget.resetView() }
         message.alignment = .center
         message.textColor = .secondaryLabelColor
         let empty = NSStackView(views: [message, installButton])
@@ -185,6 +188,7 @@ final class CameraView: NSView {
     func deactivate() {
         guard isActive else { return }
         isActive = false
+        cameraControls.setVideoEnabled(false)
         cameraControls.stop()
         player?.stop()
         settings = nil
@@ -210,6 +214,8 @@ final class CameraView: NSView {
     func startPlayback(_ url: URL) {
         guard isActive else { return }
         editing = false
+        renderTarget.resetView()
+        cameraControls.setVideoEnabled(false)
         cameraControls.stop()
         cameraControls.isHidden = false
         playbackState = .connecting
@@ -235,13 +241,14 @@ final class CameraView: NSView {
             reconnectButton.isEnabled = true
             return
         }
-        do { try player?.play(url, in: renderTarget) }
+        do { try player?.play(url, in: renderTarget.drawable) }
         catch { player?.stop(); playerChanged(.failed) }
     }
 
     func showSettings() { showSettings(error: nil) }
     private func showSettings(error: String?) {
         editing = true
+        cameraControls.setVideoEnabled(false)
         cameraControls.stop()
         cameraControls.isHidden = true
         playbackState = .idle
@@ -338,6 +345,7 @@ final class CameraView: NSView {
 
     private func playerChanged(_ state: CameraPlayer.State) {
         playbackState = state
+        cameraControls.setVideoEnabled(isActive && !editing && state == .playing)
         defer { notifyEligibilityChange() }
         guard isActive, !editing else { return }
         renderTarget.isHidden = true
@@ -350,6 +358,7 @@ final class CameraView: NSView {
             stopButton.isEnabled = true
             reconnectButton.isEnabled = false
         case .playing:
+            if let size = player?.videoSize { renderTarget.videoSize = size }
             status.stringValue = "Live"; message.stringValue = ""
             renderTarget.isHidden = false
             stopButton.isEnabled = true

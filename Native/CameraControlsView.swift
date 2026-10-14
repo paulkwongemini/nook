@@ -2,8 +2,13 @@ import AppKit
 
 @MainActor
 final class CameraControlsView: NSView {
+    var onZoomChange: ((CGFloat) -> Void)?
+    var onReset: (() -> Void)?
     private var directionButtons: [NSButton] = []
     private let directionStatus = NSTextField(wrappingLabelWithString: "Connect to move the camera.")
+    private let zoomSlider = NSSlider(value: 1, minValue: 1, maxValue: 4, target: nil, action: nil)
+    private let zoomValue = NSTextField(labelWithString: "1.0×")
+    private let resetButton = NSButton(title: "Reset", target: nil, action: nil)
     private var ptz: CameraPTZ?
     private var movementTask: Task<Void, Never>?
     private var generation = 0
@@ -45,7 +50,21 @@ final class CameraControlsView: NSView {
         directionStatus.font = .systemFont(ofSize: 11)
         directionStatus.textColor = .secondaryLabelColor
         directionStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        [pad, directionInfo].forEach {
+        let zoomTitle = NSTextField(labelWithString: "Zoom")
+        zoomTitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        zoomSlider.target = self
+        zoomSlider.action = #selector(changeZoom)
+        zoomSlider.isContinuous = true
+        zoomSlider.setAccessibilityLabel("Digital zoom")
+        zoomSlider.toolTip = "Enlarge the video without moving the camera. Drag the enlarged image to pan."
+        zoomSlider.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        zoomValue.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        zoomValue.widthAnchor.constraint(equalToConstant: 42).isActive = true
+        resetButton.target = self; resetButton.action = #selector(resetZoom)
+        resetButton.toolTip = "Return to the full image."
+        let videoControls = NSStackView(views: [zoomTitle, zoomSlider, zoomValue, resetButton])
+        videoControls.spacing = 10
+        [pad, directionInfo, videoControls].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
@@ -54,10 +73,27 @@ final class CameraControlsView: NSView {
             pad.widthAnchor.constraint(equalToConstant: 90),
             directionInfo.leadingAnchor.constraint(equalTo: pad.trailingAnchor, constant: 14),
             directionInfo.centerYAnchor.constraint(equalTo: centerYAnchor),
-            directionInfo.trailingAnchor.constraint(equalTo: trailingAnchor),
-            directionStatus.widthAnchor.constraint(equalTo: directionInfo.widthAnchor)
+            directionInfo.widthAnchor.constraint(equalToConstant: 180),
+            directionStatus.widthAnchor.constraint(equalTo: directionInfo.widthAnchor),
+            videoControls.leadingAnchor.constraint(equalTo: directionInfo.trailingAnchor, constant: 28),
+            videoControls.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            videoControls.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
+        setVideoEnabled(false)
     }
+
+    func setVideoEnabled(_ enabled: Bool) {
+        zoomSlider.isEnabled = enabled
+        resetButton.isEnabled = enabled
+    }
+
+    func updateZoom(_ zoom: CGFloat) {
+        zoomSlider.doubleValue = Double(zoom)
+        zoomValue.stringValue = String(format: "%.1f×", Double(zoom))
+    }
+
+    @objc private func changeZoom() { onZoomChange?(CGFloat(zoomSlider.doubleValue)) }
+    @objc private func resetZoom() { onReset?() }
 
     func connect(_ settings: CameraSettings) {
         stop()

@@ -12,16 +12,18 @@ xcrun swiftc "${swift_flags[@]}" Native/CameraSettings.swift Native/CameraPTZ.sw
 build/native-camera-ptz-tests
 xcrun swiftc "${swift_flags[@]}" Native/CameraPiP.swift NativeTests/CameraPiPTests.swift -o build/native-camera-pip-tests
 build/native-camera-pip-tests
+xcrun swiftc "${swift_flags[@]}" Native/CameraVideoView.swift NativeTests/CameraVideoViewTests.swift -o build/native-camera-video-tests
+build/native-camera-video-tests
 node --test NativeTests/notifications.test.cjs
 # The optional playback checks use a local, silent fixture, never the user's camera.
 if [[ "${NOOK_TEST_CAMERA:-0}" == "1" ]]; then
-  ffmpeg -hide_banner -loglevel error -f lavfi -i 'testsrc=size=640x360:rate=10' \
+  ffmpeg -hide_banner -loglevel error -f lavfi -i 'testsrc=size=1280x720:rate=10' \
     -f lavfi -i 'anullsrc=r=44100:cl=mono' \
     -t 30 -c:v libx264 -pix_fmt yuv420p -c:a aac -y build/camera-fixture.mp4
 fi
 smoke="build/tests/Nook Smoke.app"
 mkdir -p "$smoke/Contents/MacOS" "$smoke/Contents/Resources"
-xcrun swiftc "${swift_flags[@]}" Native/NavigationPolicy.swift Native/ServiceIcons.swift Native/SidebarButton.swift Native/NotificationBridge.swift Native/CameraSettings.swift Native/CameraPTZ.swift Native/CameraControlsView.swift Native/CameraPlayer.swift Native/CameraView.swift Native/CameraPiP.swift Native/Workspace.swift NativeTests/WebSmoke.swift -o "$smoke/Contents/MacOS/NookSmoke"
+xcrun swiftc "${swift_flags[@]}" Native/NavigationPolicy.swift Native/ServiceIcons.swift Native/SidebarButton.swift Native/NotificationBridge.swift Native/CameraSettings.swift Native/CameraPTZ.swift Native/CameraControlsView.swift Native/CameraPlayer.swift Native/CameraVideoView.swift Native/CameraView.swift Native/CameraPiP.swift Native/Workspace.swift NativeTests/WebSmoke.swift -o "$smoke/Contents/MacOS/NookSmoke"
 cp Native/Info.plist "$smoke/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.nook.native.tests' "$smoke/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable NookSmoke' "$smoke/Contents/Info.plist"
