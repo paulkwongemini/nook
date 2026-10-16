@@ -18,6 +18,7 @@ final class CameraView: NSView {
     private let keepOpenButton = NSButton(title: "Keep Open", target: nil, action: nil)
     private let credentials = CameraCredentialStore()
     private var settings: CameraSettings?
+    private var pendingControlSettings: CameraSettings?
     private var player: CameraPlayer?
     private(set) var isActive = false
     private var editing = false
@@ -205,18 +206,18 @@ final class CameraView: NSView {
         guard isActive else { return }
         guard let settings else { showSettings(); return }
         do {
-            startPlayback(try settings.streamURL())
-            cameraControls.connect(settings)
+            startPlayback(try settings.streamURL(), controls: settings)
         }
         catch { showSettings(error: "Check the camera IP address.") }
     }
 
-    func startPlayback(_ url: URL) {
+    func startPlayback(_ url: URL, controls: CameraSettings? = nil) {
         guard isActive else { return }
         editing = false
         renderTarget.resetView()
         cameraControls.setVideoEnabled(false)
-        cameraControls.stop()
+        cameraControls.waitForVideo()
+        pendingControlSettings = controls
         cameraControls.isHidden = false
         playbackState = .connecting
         defer { notifyEligibilityChange() }
@@ -233,6 +234,8 @@ final class CameraView: NSView {
                 player?.onStateChange = { [weak self] state in self?.playerChanged(state) }
             }
         } catch {
+            pendingControlSettings = nil
+            cameraControls.stop()
             playbackState = .failed
             status.stringValue = "VLC needed"
             message.stringValue = "Install the official VLC app in Applications, then reconnect. Nook uses VLC to play your camera inside this tab."
@@ -345,6 +348,10 @@ final class CameraView: NSView {
 
     private func playerChanged(_ state: CameraPlayer.State) {
         playbackState = state
+        if state == .idle || state == .ended || state == .failed {
+            pendingControlSettings = nil
+            cameraControls.stop()
+        }
         cameraControls.setVideoEnabled(isActive && !editing && state == .playing)
         defer { notifyEligibilityChange() }
         guard isActive, !editing else { return }
@@ -362,6 +369,10 @@ final class CameraView: NSView {
             status.stringValue = "Live"; message.stringValue = ""
             renderTarget.isHidden = false
             stopButton.isEnabled = true
+            if let settings = pendingControlSettings {
+                pendingControlSettings = nil
+                cameraControls.connect(settings)
+            }
         case .ended: status.stringValue = "Disconnected"; message.stringValue = "The stream ended. Reconnect to watch again."
         case .failed: status.stringValue = "Could not connect"; message.stringValue = "Check that your home VPN is connected and the camera account is correct, then reconnect."
         }

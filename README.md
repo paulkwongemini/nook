@@ -6,7 +6,7 @@ I built Nook to keep my work Google account separate from my personal Chrome ses
 
 It opens Google's own pages and keeps one account signed in across the services. Docs, Sheets, and Slides open in your browser.
 
-The Camera tab plays an RTSP camera inside Nook using [VLC](https://www.videolan.org/vlc/) installed on your Mac. Use a home VPN to watch remotely. **Keep Open** keeps video and sound playing in a small corner view while using other tabs. Pan & Tilt moves supported Tapo cameras in short steps using the same camera account; tested with the C210.
+The Camera tab plays an RTSP camera inside Nook using [VLC](https://www.videolan.org/vlc/) installed on your Mac. Use a home VPN to watch remotely. **Keep Open** keeps video and sound playing in a small corner view while using other tabs. Pan & Tilt moves supported Tapo cameras in short steps using the same camera account; tested with the C210. Use **Set** to save up to three camera positions, then click **Position 1–3** to return to them. Right-click a position to delete it.
 
 **Zoom** enlarges the video up to 4×; drag the enlarged picture to pan. Zoom stays active in the corner view. **Reset** returns to the full picture.
 
@@ -23,6 +23,6 @@ bash scripts/build.sh
 open build/Nook.app
 ```
 
-Version 0.0.1 has been tested on Apple Silicon with a Workspace account. Chat notification banners still need testing, and builds aren't notarized.
+Version 0.0.2 has been tested on Apple Silicon with a Workspace account. Chat notification banners still need testing, and builds aren't notarized.
 
 Nook isn't affiliated with Google. The app and sidebar icons are original. A code license hasn't been selected yet.

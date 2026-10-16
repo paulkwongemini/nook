@@ -2,6 +2,18 @@ import Foundation
 import CryptoKit
 import Security
 
+struct CameraPosition: Equatable {
+    let pan: Double
+    let tilt: Double
+    let space: String?
+}
+
+struct CameraPreset: Equatable {
+    let token: String
+    let name: String
+    var position: CameraPosition? = nil
+}
+
 enum CameraDirection: CaseIterable { case up, down, left, right }
 
 @MainActor
@@ -19,6 +31,8 @@ final class CameraPTZ {
     private var preparation: Task<Void, Error>?
     private var movement: Task<Void, Error>?
     private var generation = 0
+    private var movementUncertain = false
+    private static let presetPrefix = "Nook: "
 
     private struct Profile {
         let endpoint: URL
@@ -60,16 +74,140 @@ final class CameraPTZ {
     }
 
     func move(_ direction: CameraDirection) async throws {
+        try await runOperation { profile in try await self.performMove(direction, profile: profile) }
+    }
+
+    // All preset operations share the arrow movement lock, including the read before a save.
+    private func runOperation(_ operation: @escaping (Profile) async throws -> Void) async throws {
+        guard !movementUncertain else { throw CameraPTZError.stopFailed }
         guard movement == nil else { throw CameraPTZError.busy }
         try await prepare()
         try Task.checkCancellation()
         guard movement == nil, let profile else { throw CameraPTZError.busy }
-        let task = Task { try await performMove(direction, profile: profile) }
+        let task = Task { try await operation(profile) }
         movement = task
         defer { movement = nil }
         try await withTaskCancellationHandler {
             try await task.value
         } onCancel: { task.cancel() }
+    }
+
+    func loadPresets() async throws -> [CameraPreset] {
+        var presets: [CameraPreset] = []
+        try await runOperation { presets = try await self.readPresets($0) }
+        return presets
+    }
+
+    private func readPresets(_ profile: Profile) async throws -> [CameraPreset] {
+        let response = try await request(profile.endpoint, namespace: Self.ptz, action: "GetPresets",
+                                         content: profileToken(profile))
+        return try response.children.filter { $0.name == "Preset" && $0.namespace == Self.ptz }.compactMap { node in
+            let name = node.value("Name", Self.schema)
+            guard name.hasPrefix(Self.presetPrefix) else { return nil }
+            guard let token = node.attributes["token"], !token.isEmpty else { throw CameraPTZError.invalidResponse }
+            return CameraPreset(token: token, name: String(name.dropFirst(Self.presetPrefix.count)),
+                                position: position(node.child("PTZPosition", Self.schema)))
+        }
+    }
+
+    func savePreset(name: String, replacing token: String? = nil) async throws {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 32, name.rangeOfCharacter(from: .controlCharacters) == nil else {
+            throw CameraPTZError.presetName
+        }
+        try await runOperation { profile in
+            let presets = try await self.readPresets(profile)
+            if let token {
+                guard presets.contains(where: { $0.token == token }) else { throw CameraPTZError.presetMissing }
+            } else {
+                guard presets.count < 3 else { throw CameraPTZError.presetLimit }
+            }
+            let replacement = token.map { "<p:PresetToken>\(self.escape($0))</p:PresetToken>" } ?? ""
+            let result = try await self.request(profile.endpoint, namespace: Self.ptz, action: "SetPreset",
+                content: self.profileToken(profile) + "<p:PresetName>\(self.escape(Self.presetPrefix + name))</p:PresetName>" + replacement)
+            guard !result.value("PresetToken", Self.ptz).isEmpty else { throw CameraPTZError.invalidResponse }
+        }
+    }
+
+    func removePreset(token: String) async throws {
+        try await runOperation { profile in
+            guard try await self.readPresets(profile).contains(where: { $0.token == token }) else { throw CameraPTZError.presetMissing }
+            _ = try await self.request(profile.endpoint, namespace: Self.ptz, action: "RemovePreset",
+                content: self.profileToken(profile) + "<p:PresetToken>\(self.escape(token))</p:PresetToken>")
+        }
+    }
+
+    func gotoPreset(token: String) async throws {
+        try await runOperation { profile in
+            guard let preset = try await self.readPresets(profile).first(where: { $0.token == token }) else { throw CameraPTZError.presetMissing }
+            try await self.performPresetMove(preset, profile: profile)
+        }
+    }
+
+    private func position(_ node: CameraXMLElement?) -> CameraPosition? {
+        guard let coordinates = node?.child("PanTilt", Self.schema),
+              let x = coordinates.attributes["x"].flatMap(Double.init),
+              let y = coordinates.attributes["y"].flatMap(Double.init), x.isFinite, y.isFinite else { return nil }
+        return CameraPosition(pan: x, tilt: y, space: coordinates.attributes["space"])
+    }
+
+    private func profileToken(_ profile: Profile) -> String {
+        "<p:ProfileToken>\(escape(profile.token))</p:ProfileToken>"
+    }
+
+    private func stopPresetMove(_ profile: Profile) async throws {
+        _ = try await request(profile.endpoint, namespace: Self.ptz, action: "Stop",
+                              content: profileToken(profile) + "<p:PanTilt>true</p:PanTilt><p:Zoom>true</p:Zoom>")
+    }
+
+    private func performPresetMove(_ preset: CameraPreset, profile: Profile) async throws {
+        try Task.checkCancellation()
+        // Keep the command alive until its response, then confirm Stop again: cancellation
+        // must not let a delayed GotoPreset arrive after the final Stop.
+        let command = Task {
+            _ = try await request(profile.endpoint, namespace: Self.ptz, action: "GotoPreset",
+                                  content: profileToken(profile) + "<p:PresetToken>\(escape(preset.token))</p:PresetToken>")
+        }
+        let (cancellations, signal) = AsyncStream<Void>.makeStream()
+        let cancellationStop = Task {
+            for await _ in cancellations { try await self.stopPresetMove(profile) }
+        }
+        var failure: Error?
+        do {
+            try await withTaskCancellationHandler {
+                try await command.value
+                let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+                while true {
+                    try Task.checkCancellation()
+                    guard ContinuousClock.now < deadline else { throw CameraPTZError.presetTimeout }
+                    try await Task.sleep(nanoseconds: 250_000_000)
+                    let response = try await request(profile.endpoint, namespace: Self.ptz, action: "GetStatus", content: profileToken(profile))
+                    let ptzStatus = response.child("PTZStatus", Self.ptz)
+                    let status = ptzStatus?.child("MoveStatus", Self.schema)?.value("PanTilt", Self.schema)
+                    // C210 reports UNKNOWN even when stationary; compare absolute coordinates
+                    // when the camera supplies the saved and current positions.
+                    if let target = preset.position, let current = position(ptzStatus?.child("Position", Self.schema)) {
+                        guard target.space == current.space || target.space == nil || current.space == nil else {
+                            throw CameraPTZError.presetStatus
+                        }
+                        if abs(target.pan - current.pan) <= 0.005 && abs(target.tilt - current.tilt) <= 0.005 { break }
+                    } else {
+                        if status == "IDLE" { break }
+                        guard status == "MOVING" else { throw CameraPTZError.presetStatus }
+                    }
+                }
+            } onCancel: { signal.yield(()) }
+        } catch { failure = error }
+        signal.finish()
+        _ = try? await cancellationStop.value
+        let stop = Task { try await self.stopPresetMove(profile) }
+        do { try await stop.value }
+        catch {
+            movementUncertain = true
+            throw CameraPTZError.stopFailed
+        }
+        if let failure { throw failure }
+        try Task.checkCancellation()
     }
 
     func cancel() {
@@ -78,6 +216,11 @@ final class CameraPTZ {
         preparation = nil
         movement?.cancel()
         profile = nil
+    }
+
+    func waitUntilStopped() async {
+        // A replacement client must not race this client's final Stop.
+        _ = try? await movement?.value
     }
 
     private func discover() async throws -> Profile {
@@ -245,16 +388,22 @@ final class CameraPTZ {
 }
 
 private enum CameraPTZError: LocalizedError {
+    case presetName, presetLimit, presetMissing, presetTimeout, presetStatus
     case busy, unsupported, connection, authentication, invalidResponse, rejected, stopFailed
     var errorDescription: String? {
         switch self {
+        case .presetName: return "Enter a preset name using 1–32 characters on one line."
+        case .presetLimit: return "All three preset slots are full. Replace or delete a saved position."
+        case .presetMissing: return "This preset is no longer available. Reconnect to refresh the list."
+        case .presetTimeout: return "The camera took too long to reach the preset and was stopped."
+        case .presetStatus: return "The camera could not confirm its movement status and was stopped."
         case .busy: return "Wait for the current camera movement to finish."
         case .unsupported: return "This camera does not report support for short pan and tilt movements."
         case .connection: return "Could not reach the camera's movement controls. Check the camera and VPN connection."
         case .authentication: return "Camera login failed. Check the camera username and password."
         case .invalidResponse: return "The camera returned an invalid response to the movement request."
         case .rejected: return "The camera could not complete the movement request."
-        case .stopFailed: return "The camera did not confirm Stop. The movement timeout will end this step."
+        case .stopFailed: return "The camera did not confirm Stop. Reconnect before moving it again."
         }
     }
 }

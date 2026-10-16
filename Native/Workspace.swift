@@ -147,12 +147,20 @@ final class NativeWorkspace: NSObject, NSWindowDelegate, WKNavigationDelegate, W
     private func ensure(_ service: NativeService) -> WKWebView {
         if let web = views[service] { return web }
         let web = makeView(service: service)
+        // WebKit's native drag hit test ignores isHidden. A plain hidden parent
+        // keeps inactive pages out of AppKit's drag routing while retaining them.
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.isHidden = true
         web.translatesAutoresizingMaskIntoConstraints = false
         web.isHidden = true
-        surface.addSubview(web)
+        container.addSubview(web)
+        surface.addSubview(container)
         NSLayoutConstraint.activate([
-            web.leadingAnchor.constraint(equalTo: surface.leadingAnchor), web.trailingAnchor.constraint(equalTo: surface.trailingAnchor),
-            web.topAnchor.constraint(equalTo: surface.topAnchor), web.bottomAnchor.constraint(equalTo: surface.bottomAnchor)
+            container.leadingAnchor.constraint(equalTo: surface.leadingAnchor), container.trailingAnchor.constraint(equalTo: surface.trailingAnchor),
+            container.topAnchor.constraint(equalTo: surface.topAnchor), container.bottomAnchor.constraint(equalTo: surface.bottomAnchor),
+            web.leadingAnchor.constraint(equalTo: container.leadingAnchor), web.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            web.topAnchor.constraint(equalTo: container.topAnchor), web.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
         views[service] = web
         if automaticallyLoadsPages { web.load(URLRequest(url: service.url)) }
@@ -166,7 +174,10 @@ final class NativeWorkspace: NSObject, NSWindowDelegate, WKNavigationDelegate, W
         _ = ensure(.chat)
         let web = ensure(service)
         selected = service
-        for (key, view) in views { view.isHidden = key != service }
+        for (key, view) in views {
+            view.isHidden = key != service
+            view.superview?.isHidden = key != service
+        }
         for (key, button) in buttons {
             button.state = key == service ? .on : .off
         }
@@ -189,7 +200,7 @@ final class NativeWorkspace: NSObject, NSWindowDelegate, WKNavigationDelegate, W
             cameraView = camera
         }
         restoreFullCamera()
-        views.values.forEach { $0.isHidden = true }
+        views.values.forEach { $0.isHidden = true; $0.superview?.isHidden = true }
         buttons.values.forEach { $0.state = .off }
         cameraButton.state = .on
         cameraView?.isHidden = false

@@ -14,6 +14,13 @@ xcrun swiftc "${swift_flags[@]}" Native/CameraPiP.swift NativeTests/CameraPiPTes
 build/native-camera-pip-tests
 xcrun swiftc "${swift_flags[@]}" Native/CameraVideoView.swift NativeTests/CameraVideoViewTests.swift -o build/native-camera-video-tests
 build/native-camera-video-tests
+connection_tests="build/tests/Camera Connection Tests.app"
+mkdir -p "$connection_tests/Contents/MacOS"
+xcrun swiftc "${swift_flags[@]}" Native/CameraSettings.swift Native/CameraControlsView.swift Native/CameraVideoView.swift Native/CameraView.swift NativeTests/CameraConnectionTests.swift -o "$connection_tests/Contents/MacOS/CameraConnectionTests"
+cp Native/Info.plist "$connection_tests/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier local.nook.native.connection-tests.$(uuidgen)" "$connection_tests/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Set :CFBundleExecutable CameraConnectionTests' "$connection_tests/Contents/Info.plist"
+"$connection_tests/Contents/MacOS/CameraConnectionTests"
 node --test NativeTests/notifications.test.cjs
 # The optional playback checks use a local, silent fixture, never the user's camera.
 if [[ "${NOOK_TEST_CAMERA:-0}" == "1" ]]; then

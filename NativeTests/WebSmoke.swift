@@ -2,6 +2,34 @@ import AppKit
 import WebKit
 
 @MainActor
+final class FileDraggingInfo: NSObject, NSDraggingInfo {
+    let draggingDestinationWindow: NSWindow?
+    let draggingPasteboard: NSPasteboard
+    let draggingLocation: NSPoint
+    let draggingSourceOperationMask: NSDragOperation = .copy
+    let draggingSource: Any? = nil
+    let draggingSequenceNumber = 1
+    let draggedImageLocation = NSPoint.zero
+    let draggedImage: NSImage? = nil
+    var draggingFormation: NSDraggingFormation = .none
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 1
+    let springLoadingHighlight: NSSpringLoadingHighlight = .none
+
+    init(window: NSWindow, pasteboard: NSPasteboard, location: NSPoint) {
+        draggingDestinationWindow = window
+        draggingPasteboard = pasteboard
+        draggingLocation = location
+    }
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    nonisolated override func namesOfPromisedFilesDropped(atDestination dropDestination: URL) -> [String]? { nil }
+    func resetSpringLoading() {}
+    func enumerateDraggingItems(options enumOpts: NSDraggingItemEnumerationOptions, for view: NSView?,
+                                classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any],
+                                using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
+}
+
+@MainActor
 final class DownloadProbe: NSObject, WKNavigationDelegate {
     let workspace: NativeWorkspace
     var converted = false
@@ -38,6 +66,87 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
             if !web.isLoading, (try? await web.evaluateJavaScript("document.readyState")) as? String == "complete" { return }
         }
         throw NSError(domain: "Smoke", code: 2, userInfo: [NSLocalizedDescriptionKey: "Fixture did not load"])
+    }
+    private func dragDestination(at location: NSPoint, types: [NSPasteboard.PasteboardType]) throws -> NSView? {
+        let root = workspace.window.contentView!
+        // Test-only access to the same AppKit destination hit test used during a native drag.
+        // Ordinary hitTest does not exercise WKWebView's separate drag destination routing.
+        let selector = NSSelectorFromString("_hitTest:dragTypes:")
+        try check(root.responds(to: selector), "AppKit exposes its native drag destination hit test")
+        typealias DragHitTest = @convention(c) (AnyObject, Selector, UnsafeMutablePointer<NSPoint>, NSSet) -> NSView?
+        let hitTest = unsafeBitCast(root.method(for: selector), to: DragHitTest.self)
+        var point = root.superview?.convert(location, from: nil) ?? location
+        return hitTest(root, selector, &point, NSSet(array: types))
+    }
+    private func checkFileDrop(_ web: WKWebView, afterServiceSwitch: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("nook-file-drop-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("Finder upload fixture.txt")
+        let contents = "Local Finder file upload fixture."
+        try contents.write(to: file, atomically: true, encoding: .utf8)
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        try check(pasteboard.writeObjects([file as NSURL]), "File drag writes a native file URL")
+        let filenames = NSPasteboard.PasteboardType("NSFilenamesPboardType")
+        pasteboard.addTypes([filenames], owner: nil)
+        pasteboard.setPropertyList([file.path], forType: filenames)
+        _ = try await web.evaluateJavaScript("""
+            document.getElementById('file-drop-fixture')?.remove();
+            window.fileDropProbe = { entered: 0, over: 0, dropped: 0, files: [], error: '', ready: false };
+            (() => {
+                const target = document.createElement('div');
+                target.id = 'file-drop-fixture';
+                target.style = 'position:fixed;inset:60px;background:#eee;z-index:9999';
+                target.textContent = 'Local native file drop target';
+                target.addEventListener('dragenter', event => { event.preventDefault(); fileDropProbe.entered++; });
+                target.addEventListener('dragover', event => {
+                    event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; fileDropProbe.over++;
+                });
+                target.addEventListener('drop', async event => {
+                    event.preventDefault(); fileDropProbe.dropped++;
+                    try {
+                        fileDropProbe.files = await Promise.all(Array.from(event.dataTransfer.files,
+                            async file => ({name: file.name, text: await file.text()})));
+                    } catch (error) { fileDropProbe.error = String(error); }
+                    fileDropProbe.ready = true;
+                });
+                document.body.append(target);
+            })(); true
+            """)
+        let location = web.convert(NSPoint(x: web.bounds.midX, y: web.bounds.midY), to: nil)
+        let info = FileDraggingInfo(window: workspace.window, pasteboard: pasteboard, location: location)
+        let destination = try dragDestination(at: location, types: pasteboard.types ?? [])
+        let destinationService = workspace.views.first { $0.value === destination }?.key.rawValue ?? String(describing: destination)
+        print("Native file drop routing (after service switch: \(afterServiceSwitch)): \(destinationService)")
+        try check(destination === web, "Finder file drags must target visible Chat, not a hidden service (destination: \(destinationService))")
+        _ = web.draggingEntered(info)
+        var operation: NSDragOperation = []
+        for _ in 0..<100 {
+            operation = web.draggingUpdated(info)
+            try await Task.sleep(nanoseconds: 25_000_000)
+            let entered = try await web.evaluateJavaScript("fileDropProbe.entered") as? Int ?? 0
+            if entered > 0 && operation.contains(.copy) { break }
+        }
+        let entered = try await web.evaluateJavaScript("fileDropProbe.entered") as? Int ?? 0
+        try check(entered > 0, "Native Finder drag enters the page")
+        try check(operation.contains(.copy), "The page accepts copying the Finder file")
+        try check(web.prepareForDragOperation(info), "WebKit prepares the Finder file drop")
+        try check(web.performDragOperation(info), "WebKit accepts the Finder file drop")
+        for _ in 0..<100 {
+            if (try await web.evaluateJavaScript("fileDropProbe.ready")) as? Bool == true { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+        let result = try await web.evaluateJavaScript("fileDropProbe") as? [String: Any] ?? [:]
+        try check(result["dropped"] as? Int == 1, "Native Finder drag reaches the page's drop handler")
+        try check(result["error"] as? String == "", "Dropped file remains readable by the web process")
+        let files = result["files"] as? [[String: String]] ?? []
+        try check(files.count == 1 && files.first?["name"] == file.lastPathComponent && files.first?["text"] == contents,
+                  "Finder file drop preserves the filename and actual file bytes")
+        try check(external.isEmpty, "Uploading a file does not open an external application")
+        web.concludeDragOperation(info)
+        _ = try await web.evaluateJavaScript("document.getElementById('file-drop-fixture').remove(); true")
+        print("Native Finder file drop and readable payload (after service switch: \(afterServiceSwitch)): passed")
     }
     private func waitForCamera(_ condition: () -> Bool) async throws {
         for _ in 0..<100 {
@@ -205,6 +314,7 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
         print("Chat browser identity: \(userAgent)")
         try check(userAgent.range(of: "Version/[0-9]+(?:\\.[0-9]+)* Safari/[0-9.]+ Nook/[0-9.]+", options: .regularExpression) != nil,
                   "Chat needs a Safari-compatible browser version while retaining the Nook identity")
+        try await checkFileDrop(chat, afterServiceSwitch: false)
         workspace.select(.gmail)
         let gmail = workspace.views[.gmail]!
         gmail.loadHTMLString("<!doctype html><title>Local Gmail fixture</title><p>Fixture</p>", baseURL: NativeService.gmail.url)
@@ -240,6 +350,7 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
         try check(workspace.views[.chat] === chat, "Service switch preserves view")
         let draft = try await chat.evaluateJavaScript("document.getElementById('draft').value") as? String
         try check(draft == "unsent fixture", "Service switch preserves draft")
+        try await checkFileDrop(chat, afterServiceSwitch: true)
         workspace.select(.calendar)
         try check(workspace.views[.calendar] === calendar, "Returning to Calendar preserves its page")
         let eventDraft = try await calendar.evaluateJavaScript("document.getElementById('event').value") as? String
@@ -253,6 +364,10 @@ final class SmokeDelegate: NSObject, NSApplicationDelegate {
                   "Camera replaces the visible page without opening an external app")
         try check(camera.bounds.width >= 899 && camera.bounds.height >= 664, "Camera fills the content area")
         try check(workspace.views.count == 4 && external.isEmpty, "Camera keeps the Google pages and account session intact")
+        let cameraDropLocation = camera.convert(NSPoint(x: camera.bounds.midX, y: camera.bounds.midY), to: nil)
+        let cameraDropDestination = try dragDestination(at: cameraDropLocation,
+                                                       types: [.fileURL, NSPasteboard.PasteboardType("NSFilenamesPboardType")])
+        try check(!(cameraDropDestination is WKWebView), "A file dragged over Camera must not target a hidden Google page")
         func cameraSubviews(_ view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + cameraSubviews($0) } }
         let cameraButtons = cameraSubviews(camera).compactMap { $0 as? NSButton }
         guard let keepOpen = cameraButtons.first(where: { $0.title == "Keep Open" }),

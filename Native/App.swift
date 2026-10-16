@@ -81,7 +81,7 @@ final class NativeAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func testNotification() { workspace.notifications.sendTest() }
     @objc private func about() {
         var options: [NSApplication.AboutPanelOptionKey: Any] = [
-            .applicationName: "Nook", .applicationVersion: "0.0.1",
+            .applicationName: "Nook", .applicationVersion: "0.0.2",
             .credits: NSAttributedString(string: "Swift · AppKit · WebKit\nChat · Mail · Drive · Calendar · Camera")]
         if let icon = NSApp.applicationIconImage { options[.applicationIcon] = icon }
         NSApp.orderFrontStandardAboutPanel(options: options)

@@ -137,6 +137,10 @@ struct CameraPTZTests {
     }
     static func main() async {
         do {
+            try await testPresets()
+            try await testPresetMovementCancellation()
+            try await testPresetCancellationStopsBeforeDelayedResponse()
+            try await testPresetArrivalWithUnknownMovementStatus()
             try await testDiscoveryAuthenticationAndMovement()
             try await testSlowResponseStillStopsPromptly()
             try await testUntrustedEndpointsAndResponses()
@@ -147,6 +151,98 @@ struct CameraPTZTests {
             fputs("Camera PTZ test failed: \(error.localizedDescription)\n", stderr)
             exit(1)
         }
+    }
+    static func testPresets() async throws {
+        let fixture = Fixture()
+        var count = 2
+        fixture.override = { xml in
+            if xml.contains("<p:GetPresets>") {
+                let owned = (0..<count).map { "<p:Preset token=\"slot\($0)\"><t:Name>Nook: Room \($0)</t:Name></p:Preset>" }.joined()
+                return Reply(xml: envelope("<p:GetPresetsResponse><p:Preset token=\"external\"><t:Name>Other app</t:Name></p:Preset>\(owned)</p:GetPresetsResponse>"))
+            }
+            if xml.contains("<p:SetPreset>") { return Reply(xml: envelope("<p:SetPresetResponse><p:PresetToken>new-token</p:PresetToken></p:SetPresetResponse>")) }
+            if xml.contains("<p:RemovePreset>") { return Reply(xml: envelope("<p:RemovePresetResponse/>")) }
+            if xml.contains("<p:GotoPreset>") { return Reply(xml: envelope("<p:GotoPresetResponse/>")) }
+            if xml.contains("<p:GetStatus>") { return Reply(xml: envelope("<p:GetStatusResponse><p:PTZStatus><t:MoveStatus><t:PanTilt>IDLE</t:PanTilt></t:MoveStatus></p:PTZStatus></p:GetStatusResponse>")) }
+            return nil
+        }
+        let camera = try make(fixture)
+        let presets = try await camera.loadPresets()
+        try expect(presets.map(\.name) == ["Room 0", "Room 1"], "Restore Nook names and exclude other apps' presets")
+        try await camera.savePreset(name: " Window <&\" ")
+        let saved = body(fixture.requests.last!)
+        try expect(try values(saved, "//*[local-name()='PresetName']") == ["Nook: Window <&\""], "Trim and XML-escape saved names")
+        count = 3
+        let before = fixture.requests.filter { body($0).contains("<p:SetPreset>") }.count
+        try await assertFailure({ try await camera.savePreset(name: "Fourth") }, "Do not create a fourth Nook preset")
+        try expect(fixture.requests.filter { body($0).contains("<p:SetPreset>") }.count == before, "Enforce limit before writing to camera")
+        try await camera.savePreset(name: "Updated", replacing: "slot1")
+        try expect(try values(body(fixture.requests.last!), "//*[local-name()='PresetToken']") == ["slot1"], "Replace the same preset without creating another")
+        try await assertFailure({ try await camera.savePreset(name: " ") }, "Reject blank names")
+        try await assertFailure({ try await camera.removePreset(token: "external") }, "Never delete another app's preset")
+        try await camera.removePreset(token: "slot0")
+        try expect(body(fixture.requests.last!).contains("<p:RemovePreset>"), "Delete the selected owned preset")
+        try await camera.gotoPreset(token: "slot1")
+        try expect(fixture.requests.contains { body($0).contains("<p:GetStatus>") }, "Wait for arrival rather than just HTTP acknowledgement")
+        try expect(body(fixture.requests.last!).contains("<p:Stop>"), "Confirm Stop at the end of preset travel")
+    }
+
+    static func testPresetMovementCancellation() async throws {
+        for cancelClient in [false, true] {
+            let fixture = Fixture()
+            fixture.override = { xml in
+                if xml.contains("<p:GetPresets>") { return Reply(xml: envelope("<p:GetPresetsResponse><p:Preset token=\"one\"><t:Name>Nook: Door</t:Name></p:Preset></p:GetPresetsResponse>")) }
+                if xml.contains("<p:GotoPreset>") { return Reply(xml: envelope("<p:GotoPresetResponse/>"), delay: 0.2) }
+                if xml.contains("<p:GetStatus>") { return Reply(xml: envelope("<p:GetStatusResponse><p:PTZStatus><t:MoveStatus><t:PanTilt>MOVING</t:PanTilt></t:MoveStatus></p:PTZStatus></p:GetStatusResponse>")) }
+                if xml.contains("<p:Stop>") { return Reply(xml: envelope("<p:StopResponse/>"), delay: 0.2) }
+                return nil
+            }
+            let camera = try make(fixture)
+            try await camera.prepare()
+            let movement = Task { try await camera.gotoPreset(token: "one") }
+            try await waitForRequest("GotoPreset", in: fixture)
+            try await assertFailure({ try await camera.move(.left) }, "Arrow movement must not overlap preset travel")
+            try await assertFailure({ try await camera.savePreset(name: "Wrong position") }, "Do not save during preset travel")
+            if cancelClient { camera.cancel() } else { movement.cancel() }
+            try await waitForRequest("Stop", in: fixture)
+            try await assertFailure({ try await camera.move(.right) }, "Keep locked until Stop completes")
+            try await assertFailure({ try await movement.value }, "Cancelled preset travel must report cancellation")
+            try expect(body(fixture.requests.last!).contains("<p:Stop>"), "Cancellation must send Stop even after view disconnects")
+        }
+    }
+    static func testPresetCancellationStopsBeforeDelayedResponse() async throws {
+        let fixture = Fixture()
+        fixture.override = { xml in
+            if xml.contains("<p:GetPresets>") { return Reply(xml: envelope("<p:GetPresetsResponse><p:Preset token=\"one\"><t:Name>Nook: Position 1</t:Name></p:Preset></p:GetPresetsResponse>")) }
+            if xml.contains("<p:GotoPreset>") { return Reply(xml: envelope("<p:GotoPresetResponse/>"), delay: 0.8) }
+            return nil
+        }
+        let camera = try make(fixture)
+        let movement = Task { try await camera.gotoPreset(token: "one") }
+        try await waitForRequest("GotoPreset", in: fixture)
+        movement.cancel()
+        try await Task.sleep(nanoseconds: 150_000_000)
+        try expect(fixture.requests.contains { body($0).contains("<p:Stop>") }, "Stop promptly on cancellation before a delayed GotoPreset response")
+        try await assertFailure({ try await movement.value }, "Cancellation must fail after cleanup")
+        try expect(fixture.requests.filter { body($0).contains("<p:Stop>") }.count == 2, "Stop again after the delayed command response")
+    }
+    static func testPresetArrivalWithUnknownMovementStatus() async throws {
+        let fixture = Fixture()
+        var polls = 0
+        fixture.override = { xml in
+            if xml.contains("<p:GetPresets>") { return Reply(xml: envelope("<p:GetPresetsResponse><p:Preset token=\"one\"><t:Name>Nook: Position 1</t:Name><t:PTZPosition><t:PanTilt x=\"0.4\" y=\"-0.2\" space=\"urn:position\"/></t:PTZPosition></p:Preset></p:GetPresetsResponse>")) }
+            if xml.contains("<p:GotoPreset>") { return Reply(xml: envelope("<p:GotoPresetResponse/>")) }
+            if xml.contains("<p:GetStatus>") {
+                polls += 1
+                let x = polls == 1 ? "0" : "0.4"
+                return Reply(xml: envelope("<p:GetStatusResponse><p:PTZStatus><t:Position><t:PanTilt x=\"\(x)\" y=\"-0.2\" space=\"urn:position\"/></t:Position><t:MoveStatus><t:PanTilt>UNKNOWN</t:PanTilt></t:MoveStatus></p:PTZStatus></p:GetStatusResponse>"))
+            }
+            return nil
+        }
+        let camera = try make(fixture)
+        try await camera.gotoPreset(token: "one")
+        try expect(polls >= 2, "UNKNOWN status must wait until the reported coordinates reach the preset")
+        try expect(body(fixture.requests.last!).contains("<p:Stop>"), "Confirm Stop after reaching target coordinates")
     }
     static func testDiscoveryAuthenticationAndMovement() async throws {
         let fixture = Fixture()
